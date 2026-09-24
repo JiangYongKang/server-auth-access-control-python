@@ -6,6 +6,21 @@ dependencies = [
     "fastapi[standard]>=0.141.1",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+log_level = "INFO"
+log_format = "%(asctime)s %(levelname)s %(name)s %(message)s"
+log_date_format = "%H:%M:%S"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"
 default = true
