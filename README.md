@@ -30,16 +30,20 @@ python3 -m pytest --log-cli-level=INFO  # 实时打印每次判定的输入与�
 
 | 方法 | 路径 | 所需作用域 | 说明 |
 |------|------|------------|------|
-| POST | `/auth/login` | - | 凭据校验，签发访问/刷新令牌 |
+| POST | `/auth/login` | - | 凭据校验，签发访问/刷新令牌；可选 `client_id` 设备标识 |
 | POST | `/auth/refresh` | - | 刷新令牌轮换 |
+| GET  | `/auth/sessions` | 有效访问令牌 | 列出本人所有存活会话 |
+| POST | `/auth/logout` | 有效访问令牌 | 登出（撤销）当前会话 |
+| POST | `/auth/sessions/revoke` | 有效访问令牌 | 按 `session_id` 撤销本人指定会话 |
+| POST | `/auth/sessions/revoke-others` | 有效访问令牌 | 撤销本人除当前外的全部会话 |
 | GET  | `/protected/profile` | `profile:read` | 受保护资源 |
 | POST | `/protected/admin/action` | `admin:action` | 受保护资源 |
 
 ```bash
-# 登录
+# 登录（client_id 可选，不携带时行为与旧版一致）
 curl -s -X POST localhost:8000/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","password":"alice-password"}'
+  -d '{"username":"alice","password":"alice-password","client_id":"alice-laptop"}'
 
 # 访问受保护资源
 curl -s localhost:8000/protected/profile -H "Authorization: Bearer <access_token>"
@@ -48,6 +52,19 @@ curl -s localhost:8000/protected/profile -H "Authorization: Bearer <access_token
 curl -s -X POST localhost:8000/auth/refresh \
   -H 'Content-Type: application/json' \
   -d '{"refresh_token":"<refresh_token>"}'
+
+# 查看自己的会话（含设备标识、建立时间、最近刷新时间、是否当前会话）
+curl -s localhost:8000/auth/sessions -H "Authorization: Bearer <access_token>"
+
+# 登出当前会话
+curl -s -X POST localhost:8000/auth/logout -H "Authorization: Bearer <access_token>"
+
+# 撤销指定会话 / 撤销除当前外全部会话
+curl -s -X POST localhost:8000/auth/sessions/revoke \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer <access_token>" \
+  -d '{"session_id":"<session_id>"}'
+curl -s -X POST localhost:8000/auth/sessions/revoke-others \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ## 3. 令牌生命周期
@@ -57,7 +74,8 @@ curl -s -X POST localhost:8000/auth/refresh \
 - 格式为自实现的两段式签名令牌：`base64url(payload).base64url(HMAC-SHA256(secret, payload))`。
 - 载荷含 `sub / jti / sid(会话) / fid(令牌族) / sco(作用域) / iat / exp / typ`。
 - 有效期默认 15 分钟（`access_token_ttl_seconds`），**过期后必须重新用刷新令牌换取**。
-- 访问令牌不存库、无状态；服务端只验证签名与有效期。
+- 访问令牌不存库；服务端验证签名与有效期之外，还会在存储临界区内核对
+  其所属会话是否仍然存活——会话被撤销时令牌**立即失效**（见 3.4）。
 
 ### 3.2 刷新令牌（refresh token）与轮换
 
@@ -77,7 +95,44 @@ curl -s -X POST localhost:8000/auth/refresh \
   - 族内其他（尚未消费的）新令牌再使用时得到原因 `refresh_family_revoked`。
   - 两种原因**互不相同、可区分**。
 
-### 3.4 失败原因（错误码）一览
+### 3.4 会话管理（查看 / 登出 / 撤销）
+
+- **设备标识**：登录可携带可选的 `client_id`（客户端自报的设备/客户端标识），
+  随会话保存；不携带时行为与旧版完全一致，老客户端无需修改。
+- **会话列表**：`GET /auth/sessions` 只返回**本人**所有存活会话，每条含
+  `session_id / client_id / created_at / last_refresh_at / is_current`。
+  列表不包含任何他人会话，也没有任何接口可探测他人会话是否存在。
+- **三种主动撤销**：
+  1. `POST /auth/logout` —— 撤销当前请求所在的会话；
+  2. `POST /auth/sessions/revoke` —— 按 `session_id` 撤销自己的一条会话；
+     目标不属于自己或不存在时**不做任何变更**，响应与成功一致，不泄露目标是否存在；
+  3. `POST /auth/sessions/revoke-others` —— 撤销自己除当前会话外的全部会话。
+- **撤销即时生效**：会话被撤销后，其已签发的访问令牌**立即失效**
+  （`authenticate` 在校验签名/有效期之外，还在存储临界区内检查会话状态，
+  判定为 `session_revoked`，不再等待访问令牌自然过期）；
+  其刷新令牌同样立即无法再换出新令牌（`refresh_family_revoked`）。
+- **幂等**：重复撤销同一会话是 no-op，对外结果一致；不会牵连其它会话；
+  已撤销会话的撤销原因不被覆盖，也**不能被重新激活**。
+- **并发确定性**：撤销与在途的刷新/访问通过存储临界区串行化——
+  撤销一旦生效，之后该会话的访问与刷新一律被拒；
+  不会出现“撤销与刷新同时成功且新令牌仍可用”的情况
+  （刷新先完成时，新签发的令牌对随撤销立即一并失效）。
+
+### 3.5 会话数量上限与清理
+
+- **上限**：`AuthConfig.max_active_sessions_per_user`（默认 8）限制同一用户同时存活的会话数。
+  登录导致超限时，按**创建时间从旧到新**撤销最旧的存活会话（确定性规则），
+  登录响应通过 `evicted_sessions` 字段明确告知调用方哪些会话被驱逐；
+  被驱逐会话的访问/刷新令牌立即失效（`session_revoked` / `refresh_family_revoked`）。
+  已撤销/已过期的会话不占名额。
+- **清理**：`AuthService.cleanup(now)` 移除已撤销或已过期的会话、以及已过期的刷新令牌记录，
+  防止状态无限堆积；**存活（未撤销且未过期）的会话与其令牌记录绝不受影响**；
+  未过期的已消费记录保留，重放检测在清理后仍然有效。
+  被清理的会话之后仍被确定性地拒绝（不会复活）。
+- **重启一致**：会话状态、撤销标记、上限计数与限流状态全部持久化在
+  `data/auth_store.json`，清理或进程重启后上述判定结果保持一致。
+
+### 3.6 失败原因（错误码）一览
 
 | 场景 | error code | HTTP 状态 |
 |------|-----------|-----------|
@@ -97,6 +152,7 @@ curl -s -X POST localhost:8000/auth/refresh \
 | 访问令牌过期 | `access_token_expired` | **404** |
 | 缺少所需作用域 | `access_scope_insufficient` | **404** |
 | 越权尝试过多 | `rate_limited_access` | **404** |
+| 会话已撤销/不存在（登出、按会话撤销、超额驱逐） | `session_revoked` | **404**（受保护资源）/ 401（/auth/**） |
 
 > 失败原因全集定义见 `app/auth/errors.py`。
 
@@ -134,6 +190,9 @@ curl -s -X POST localhost:8000/auth/refresh \
    多进程/重启后并发刷新仍然只有一个成功（见 `tests/test_multiprocess.py`）。
 3. 状态“判定 + 变更 + 落盘”在存储临界区内原子完成；
    越权失败计数在并发下不丢失（见 `tests/test_concurrency.py`）。
+4. **撤销 vs 在途请求**：会话撤销与刷新/访问判定在同一存储临界区内串行化，
+   撤销生效后该会话的访问与刷新一律被拒，结果与线程/进程调度顺序无关
+   （见 `tests/test_sessions.py` 的并发确定性用例，重复多轮结果一致）。
 
 ## 7. 持久化与可复现性
 
@@ -163,15 +222,16 @@ tests/               # 轮换/重放、越权、并发、跨进程、重启、�
 ## 9. 本地验证清单
 
 ```bash
-python3 -m pytest --log-cli-level=INFO   # 全部 37 个用例并观察输入/判定日志
+python3 -m pytest --log-cli-level=INFO   # 全部 59 个用例并观察输入/判定日志
 ```
 
 重点对应需求：
 
 - 令牌轮换与重放：`tests/test_token_rotation.py`
 - 作用域默认拒绝与可区分失败原因：`tests/test_access_control.py`
+- 会话管理（列表可见性、三种撤销、即时失效、幂等、并发确定性、上限、清理）：`tests/test_sessions.py`
 - 线程并发（刷新互斥、越权计数不丢失）：`tests/test_concurrency.py`
 - 跨进程并发：`tests/test_multiprocess.py`
 - 重启后吊销/锁定保持：`tests/test_persistence.py`
 - 重复运行判定稳定：`tests/test_determinism.py`
-- HTTP 状态码 / 404 资源隐藏 / 429 限流：`tests/test_http_api.py`
+- HTTP 状态码 / 404 资源隐藏 / 429 限流 / 会话端点：`tests/test_http_api.py`

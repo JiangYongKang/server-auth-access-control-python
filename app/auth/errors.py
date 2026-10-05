@@ -28,6 +28,8 @@ class ErrorCode(str, Enum):
     ACCESS_TOKEN_FORGERY = "access_token_forgery"
     ACCESS_SCOPE_INSUFFICIENT = "access_scope_insufficient"
     RATE_LIMITED_ACCESS = "rate_limited_access"
+    # 会话管理阶段
+    SESSION_REVOKED = "session_revoked"
 
 
 class AuthError(Exception):
@@ -120,3 +122,13 @@ class AccessScopeInsufficientError(AuthError):
 class AccessRateLimitedError(AuthError):
     error_code = ErrorCode.RATE_LIMITED_ACCESS
     message = "too many unauthorized attempts from this subject"
+
+
+class SessionRevokedError(AuthError):
+    """会话已被撤销（登出/按会话撤销/超额驱逐）或已不存在：
+
+    该会话签发的访问令牌立即失效，不再等待自然过期。
+    """
+
+    error_code = ErrorCode.SESSION_REVOKED
+    message = "session has been revoked or no longer exists"

@@ -125,3 +125,103 @@ def test_concurrent_refresh_over_http(client):
     logger.info("decision: concurrent HTTP refresh statuses=%s codes=%s", statuses, codes)
     assert statuses == [200, 429]
     assert codes == ["ok", "refresh_concurrent"]
+
+
+# ----------------------------------------------------------------------
+# 会话管理端点
+# ----------------------------------------------------------------------
+def test_login_with_client_id_and_list_sessions(client):
+    r = client.post("/auth/login", json={
+        "username": "alice", "password": "alice-password", "client_id": "alice-laptop",
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["session_id"]
+    logger.info("input: login with client_id; decision: session_id=%s", body["session_id"])
+
+    r = client.get("/auth/sessions",
+                   headers={"Authorization": f"Bearer {body['access_token']}"})
+    assert r.status_code == 200
+    sessions = r.json()["sessions"]
+    logger.info("decision: sessions=%s", sessions)
+    assert len(sessions) == 1
+    assert sessions[0]["client_id"] == "alice-laptop"
+    assert sessions[0]["is_current"] is True
+    assert sessions[0]["created_at"] > 0
+
+
+def test_login_without_client_id_still_works(client):
+    r = login(client, "alice", "alice-password")
+    assert r.status_code == 200
+    body = r.json()
+    r = client.get("/auth/sessions",
+                   headers={"Authorization": f"Bearer {body['access_token']}"})
+    assert r.json()["sessions"][0]["client_id"] is None
+    logger.info("decision: legacy login (no client_id) unaffected")
+
+
+def test_sessions_endpoint_requires_auth(client):
+    r = client.get("/auth/sessions")
+    assert r.status_code == 401
+    assert r.json()["error"] == "access_token_missing"
+    logger.info("decision: unauthenticated session list -> 401")
+
+
+def test_logout_invalidates_tokens_immediately_over_http(client):
+    body = login(client, "alice", "alice-password").json()
+    at = body["access_token"]
+
+    r = client.post("/auth/logout", headers={"Authorization": f"Bearer {at}"})
+    assert r.status_code == 200 and r.json()["revoked"] is True
+
+    r = client.get("/protected/profile", headers={"Authorization": f"Bearer {at}"})
+    assert r.status_code == 404  # 受保护资源失败仍不泄露存在性
+    assert r.json()["error"] == "session_revoked"
+    logger.info("decision: access after logout -> 404 session_revoked (immediate)")
+
+    r = client.post("/auth/refresh", json={"refresh_token": body["refresh_token"]})
+    assert r.status_code == 401
+    assert r.json()["error"] == "refresh_family_revoked"
+    logger.info("decision: refresh after logout -> 401 refresh_family_revoked")
+
+
+def test_revoke_by_id_and_revoke_others_over_http(client):
+    s1 = login(client, "alice", "alice-password").json()
+    s2 = client.post("/auth/login", json={
+        "username": "alice", "password": "alice-password", "client_id": "second",
+    }).json()
+    s3 = client.post("/auth/login", json={
+        "username": "alice", "password": "alice-password", "client_id": "third",
+    }).json()
+
+    # 按 id 撤销 s1（用 s3 的令牌操作）
+    r = client.post("/auth/sessions/revoke",
+                    json={"session_id": s1["session_id"]},
+                    headers={"Authorization": f"Bearer {s3['access_token']}"})
+    assert r.status_code == 200 and r.json()["revoked"] is True
+    r = client.get("/protected/profile",
+                   headers={"Authorization": f"Bearer {s1['access_token']}"})
+    assert r.status_code == 404 and r.json()["error"] == "session_revoked"
+
+    # 撤销他人会话：响应一致，不做任何变更（不泄露存在性）
+    bob = login(client, "bob", "bob-password").json()
+    r = client.post("/auth/sessions/revoke",
+                    json={"session_id": bob["session_id"]},
+                    headers={"Authorization": f"Bearer {s3['access_token']}"})
+    assert r.status_code == 200 and r.json()["revoked"] is True
+    r = client.get("/auth/sessions",
+                   headers={"Authorization": f"Bearer {bob['access_token']}"})
+    assert len(r.json()["sessions"]) == 1  # bob 会话完好
+
+    # 撤销除当前外全部：s2 失效，s3 存活
+    r = client.post("/auth/sessions/revoke-others",
+                    headers={"Authorization": f"Bearer {s3['access_token']}"})
+    assert r.status_code == 200
+    assert r.json()["revoked_sessions"] == [s2["session_id"]]
+    r = client.get("/protected/profile",
+                   headers={"Authorization": f"Bearer {s2['access_token']}"})
+    assert r.status_code == 404 and r.json()["error"] == "session_revoked"
+    r = client.get("/auth/sessions",
+                   headers={"Authorization": f"Bearer {s3['access_token']}"})
+    assert [s["session_id"] for s in r.json()["sessions"]] == [s3["session_id"]]
+    logger.info("decision: revoke-by-id / foreign-noop / revoke-others all correct over HTTP")

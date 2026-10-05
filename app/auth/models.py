@@ -19,6 +19,12 @@ class Session:
     """一个登录会话；刷新令牌族（family）绑定到会话。
 
     一旦检测到已消费令牌被重放，整个会话（family）立即吊销。
+    用户主动登出/撤销/超额驱逐同样通过 revoked 标记生效。
+
+    client_label 为客户端登录时自报的设备/客户端标识（可选）。
+    last_refresh_at 记录最近一次刷新轮换时间（0.0 表示从未刷新）。
+    expires_at 为会话存活截止时间：每次轮换顺延一个刷新令牌周期，
+    过期会话不再出现在列表中，并在清理时被移除。
     """
 
     session_id: str
@@ -28,6 +34,9 @@ class Session:
     revoked: bool = False
     revoke_reason: str | None = None
     created_at: float = 0.0
+    client_label: str | None = None
+    last_refresh_at: float = 0.0
+    expires_at: float = 0.0
 
 
 @dataclass
@@ -63,6 +72,21 @@ class IssuedTokens:
     token_type: str = "Bearer"
     expires_in: int = 0
     refresh_expires_in: int = 0
+    session_id: str = ""
+    # 登录时因会话数量上限被驱逐（撤销）的旧会话 id，按创建时间从旧到新；
+    # 为空表示未触发驱逐。调用方可据此明确感知上限处理结果。
+    evicted_sessions: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SessionInfo:
+    """会话列表中的单条视图（仅本人会话）。"""
+
+    session_id: str
+    client_label: str | None
+    created_at: float
+    last_refresh_at: float
+    is_current: bool
 
 
 @dataclass
@@ -123,3 +147,6 @@ class AuthConfig:
     access_lock_seconds: int = 300
     failure_window_seconds: int = 60 * 15
     db_path: str = "data/auth_store.json"
+    # 同一用户允许同时存活的会话上限；超过时按创建时间从旧到新驱逐（撤销），
+    # 被驱逐会话的访问/刷新令牌立即失效，判定结果对调用方可区分。
+    max_active_sessions_per_user: int = 8
