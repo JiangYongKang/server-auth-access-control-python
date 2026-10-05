@@ -30,3 +30,9 @@ def require_scope(required_scope: str):
         return service.authorize(authorization, required_scope)
 
     return _dep
+
+
+def require_auth(request: Request, service: AuthService = Depends(get_service)):
+    """依赖：仅要求合法访问令牌（会话管理端点用），返回完整 claims。"""
+
+    return service.authenticate(request.headers.get("authorization"))

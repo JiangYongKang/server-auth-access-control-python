@@ -19,6 +19,12 @@ class Session:
     """一个登录会话；刷新令牌族（family）绑定到会话。
 
     一旦检测到已消费令牌被重放，整个会话（family）立即吊销。
+    用户也可主动登出/撤销会话；撤销后访问令牌立即失效、刷新令牌不可用。
+
+    device_id 为客户端登录时自报的设备/客户端标识（可为空）。
+    last_refresh_at 记录最近一次刷新轮换时间（未刷新过为 None）。
+    expires_at 为会话过期时间（= 当前刷新令牌的过期时间，随轮换顺延）；
+    历史遗留记录可能为 0.0，按“未记录过期时间”处理，不视为已过期。
     """
 
     session_id: str
@@ -28,6 +34,9 @@ class Session:
     revoked: bool = False
     revoke_reason: str | None = None
     created_at: float = 0.0
+    device_id: str | None = None
+    last_refresh_at: float | None = None
+    expires_at: float = 0.0
 
 
 @dataclass
@@ -122,4 +131,7 @@ class AuthConfig:
     access_max_failures: int = 10
     access_lock_seconds: int = 300
     failure_window_seconds: int = 60 * 15
+    # 同一用户允许同时存在的活跃会话上限；超出时按建立时间从最旧开始逐出，
+    # 被逐出的会话立即吊销（reason=evicted_by_session_limit），判定结果确定。
+    max_active_sessions_per_user: int = 10
     db_path: str = "data/auth_store.json"

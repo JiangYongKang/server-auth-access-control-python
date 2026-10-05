@@ -18,6 +18,7 @@ class ErrorCode(str, Enum):
     REFRESH_TOKEN_EXPIRED = "refresh_token_expired"
     REFRESH_TOKEN_CONSUMED = "refresh_token_consumed"
     REFRESH_FAMILY_REVOKED = "refresh_family_revoked"
+    REFRESH_SESSION_REVOKED = "refresh_session_revoked"
     RATE_LIMITED_REFRESH = "rate_limited_refresh"
     REFRESH_CONCURRENT = "refresh_concurrent"
     # 访问令牌阶段
@@ -27,7 +28,10 @@ class ErrorCode(str, Enum):
     ACCESS_TOKEN_EXPIRED = "access_token_expired"
     ACCESS_TOKEN_FORGERY = "access_token_forgery"
     ACCESS_SCOPE_INSUFFICIENT = "access_scope_insufficient"
+    ACCESS_SESSION_REVOKED = "access_session_revoked"
     RATE_LIMITED_ACCESS = "rate_limited_access"
+    # 会话管理
+    SESSION_NOT_FOUND = "session_not_found"
 
 
 class AuthError(Exception):
@@ -77,6 +81,11 @@ class RefreshFamilyRevokedError(AuthError):
     message = "token family was revoked after a replay was detected"
 
 
+class RefreshSessionRevokedError(AuthError):
+    error_code = ErrorCode.REFRESH_SESSION_REVOKED
+    message = "session was revoked (logout, user revocation or session limit eviction)"
+
+
 class RefreshRateLimitedError(AuthError):
     error_code = ErrorCode.RATE_LIMITED_REFRESH
     message = "too many refresh attempts for this subject"
@@ -115,6 +124,16 @@ class AccessTokenForgeryError(AuthError):
 class AccessScopeInsufficientError(AuthError):
     error_code = ErrorCode.ACCESS_SCOPE_INSUFFICIENT
     message = "token does not carry the required scope"
+
+
+class AccessSessionRevokedError(AuthError):
+    error_code = ErrorCode.ACCESS_SESSION_REVOKED
+    message = "session was revoked; access token is no longer valid"
+
+
+class SessionNotFoundError(AuthError):
+    error_code = ErrorCode.SESSION_NOT_FOUND
+    message = "session does not exist or does not belong to the caller"
 
 
 class AccessRateLimitedError(AuthError):
